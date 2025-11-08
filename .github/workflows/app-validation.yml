@@ -6,6 +6,11 @@ on:
       - 'apps/**'
       - 'platform/validation/**'
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   explain-changes:
     name: 📋 Explain What Changed
