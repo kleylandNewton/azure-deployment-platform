@@ -126,7 +126,7 @@ jobs:
         run: |
           CONFIG_FILE="${{ matrix.app }}/app-config.yml"
 
-          cat > terraform/terraform.tfvars <<EOF
+          cat > platform/terraform/modules/app-stack/terraform.tfvars <<EOF
           # Auto-generated from $CONFIG_FILE
           # Generated at: $(date -u)
 
@@ -153,7 +153,7 @@ jobs:
           echo "<summary>View generated terraform.tfvars</summary>" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo '```hcl' >> $GITHUB_STEP_SUMMARY
-          cat terraform/terraform.tfvars >> $GITHUB_STEP_SUMMARY
+          cat platform/terraform/modules/app-stack/terraform.tfvars >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo "</details>" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
