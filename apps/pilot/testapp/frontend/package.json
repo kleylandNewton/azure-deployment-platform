@@ -1,0 +1,11 @@
+{
+  "name": "azure-app-template-frontend",
+  "version": "1.0.0",
+  "description": "Simple frontend for Azure App Template",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
