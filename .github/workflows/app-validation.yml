@@ -1,0 +1,476 @@
+name: App Validation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/**'
+      - 'platform/validation/**'
+
+jobs:
+  explain-changes:
+    name: 📋 Explain What Changed
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect and explain changes
+        id: explain
+        run: |
+          echo "## 📋 Changes Detected" > explanation.md
+          echo "" >> explanation.md
+
+          # Detect which apps changed
+          CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | grep '^apps/' || true)
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No app changes detected." >> explanation.md
+            exit 0
+          fi
+
+          # Group by app directory
+          CHANGED_APPS=$(echo "$CHANGED_FILES" | cut -d'/' -f1-3 | sort -u)
+
+          for app in $CHANGED_APPS; do
+            echo "### 🔄 App: \`$app\`" >> explanation.md
+            echo "" >> explanation.md
+
+            # Check if this is a new app
+            if ! git diff --name-only HEAD^ HEAD | grep -q "^$app"; then
+              if [ ! -d "$app" ]; then
+                echo "**Status:** ✨ New app being added" >> explanation.md
+              else
+                echo "**Status:** 📝 Existing app being updated" >> explanation.md
+              fi
+            fi
+
+            # Check what changed
+            if echo "$CHANGED_FILES" | grep -q "$app/app-config.yml"; then
+              echo "- ⚙️ **Configuration changed** - Will trigger validation and potential redeployment" >> explanation.md
+
+              # Show config diff
+              if git diff HEAD^ HEAD "$app/app-config.yml" > /dev/null 2>&1; then
+                echo "" >> explanation.md
+                echo "<details>" >> explanation.md
+                echo "<summary>View configuration changes</summary>" >> explanation.md
+                echo "" >> explanation.md
+                echo '```diff' >> explanation.md
+                git diff HEAD^ HEAD "$app/app-config.yml" >> explanation.md
+                echo '```' >> explanation.md
+                echo "</details>" >> explanation.md
+                echo "" >> explanation.md
+              fi
+            fi
+
+            if echo "$CHANGED_FILES" | grep -q "$app/backend/"; then
+              echo "- 🔧 **Backend code changed** - Will rebuild Docker image and redeploy backend container" >> explanation.md
+            fi
+
+            if echo "$CHANGED_FILES" | grep -q "$app/frontend/"; then
+              echo "- 🎨 **Frontend code changed** - Will rebuild Docker image and redeploy frontend container" >> explanation.md
+            fi
+
+            if echo "$CHANGED_FILES" | grep -q "$app/Dockerfile"; then
+              echo "- 🐳 **Dockerfile modified** - Will undergo linting checks" >> explanation.md
+            fi
+
+            echo "" >> explanation.md
+          done
+
+          echo "---" >> explanation.md
+          echo "" >> explanation.md
+          echo "**Next Steps:**" >> explanation.md
+          echo "1. ✅ Automated validation checks will run below" >> explanation.md
+          echo "2. 💰 Cost estimation will be calculated" >> explanation.md
+          echo "3. 🔒 Security scans will check for vulnerabilities" >> explanation.md
+          echo "4. 👥 Platform team will review if all checks pass" >> explanation.md
+
+      - name: Post explanation as PR comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const explanation = fs.readFileSync('explanation.md', 'utf8');
+
+            // Check if we already posted this comment
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('📋 Changes Detected')
+            );
+
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: explanation
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: explanation
+              });
+            }
+
+  validate-config:
+    name: ✅ Validate Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install jsonschema pyyaml
+
+      - name: Find app configs to validate
+        id: find-configs
+        run: |
+          CONFIGS=$(git diff --name-only origin/main...HEAD | grep 'app-config.yml' || echo "")
+          if [ -z "$CONFIGS" ]; then
+            echo "No app-config.yml files changed"
+            echo "configs=" >> $GITHUB_OUTPUT
+          else
+            echo "Found configs: $CONFIGS"
+            echo "configs=$CONFIGS" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run validation
+        if: steps.find-configs.outputs.configs != ''
+        id: validate
+        run: |
+          echo "## ✅ Configuration Validation Results" > validation-report.md
+          echo "" >> validation-report.md
+
+          ALL_VALID=true
+
+          for config in ${{ steps.find-configs.outputs.configs }}; do
+            echo "Validating: $config"
+            echo "### 📄 \`$config\`" >> validation-report.md
+            echo "" >> validation-report.md
+
+            if python platform/validation/validate.py "$config" > result.json 2>&1; then
+              echo "✅ **Validation passed!**" >> validation-report.md
+              echo "" >> validation-report.md
+            else
+              ALL_VALID=false
+              echo "❌ **Validation failed**" >> validation-report.md
+              echo "" >> validation-report.md
+
+              # Parse and display errors
+              if [ -f result.json ]; then
+                python -c "
+import json
+import sys
+
+try:
+    with open('result.json') as f:
+        result = json.load(f)
+
+    if not result.get('is_valid', False):
+        print('**Issues found:**\n')
+        for error in result.get('errors', []):
+            severity = error.get('severity', 'error')
+            emoji = '🔴' if severity == 'critical' else '⚠️' if severity == 'warning' else '❌'
+
+            print(f'{emoji} **{error.get(\"error\", \"Unknown error\")}**')
+            if 'field' in error:
+                print(f'   - **Field:** \`{error[\"field\"]}\`')
+            if 'why_this_matters' in error:
+                print(f'   - **Why this matters:** {error[\"why_this_matters\"]}')
+            if 'fix' in error:
+                print(f'   - **How to fix:** {error[\"fix\"]}')
+            if 'docs_link' in error:
+                print(f'   - **Documentation:** [{error[\"docs_link\"]}]({error[\"docs_link\"]})')
+            print()
+except Exception as e:
+    print(f'Error parsing validation results: {e}')
+    sys.exit(1)
+                " >> validation-report.md
+              fi
+            fi
+
+            echo "---" >> validation-report.md
+            echo "" >> validation-report.md
+          done
+
+          if [ "$ALL_VALID" = "false" ]; then
+            echo "**❌ Validation failed for one or more configs. Please fix the issues above.**" >> validation-report.md
+            exit 1
+          else
+            echo "**✅ All configurations are valid!**" >> validation-report.md
+          fi
+
+      - name: Post validation results
+        if: always() && steps.find-configs.outputs.configs != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('validation-report.md', 'utf8');
+
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('Configuration Validation Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
+
+  estimate-costs:
+    name: 💰 Estimate Costs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pyyaml
+
+      - name: Find app configs
+        id: find-configs
+        run: |
+          CONFIGS=$(git diff --name-only origin/main...HEAD | grep 'app-config.yml' || echo "")
+          echo "configs=$CONFIGS" >> $GITHUB_OUTPUT
+
+      - name: Estimate costs
+        if: steps.find-configs.outputs.configs != ''
+        run: |
+          echo "## 💰 Cost Estimation" > cost-report.md
+          echo "" >> cost-report.md
+          echo "Estimated monthly costs for your deployment:" >> cost-report.md
+          echo "" >> cost-report.md
+
+          for config in ${{ steps.find-configs.outputs.configs }}; do
+            echo "### 📊 \`$config\`" >> cost-report.md
+            echo "" >> cost-report.md
+
+            if python scripts/estimate-costs.py "$config" >> cost-report.md 2>&1; then
+              echo "" >> cost-report.md
+            else
+              echo "⚠️ Could not estimate costs for this config" >> cost-report.md
+              echo "" >> cost-report.md
+            fi
+
+            echo "---" >> cost-report.md
+            echo "" >> cost-report.md
+          done
+
+          echo "**ℹ️ Note:** These are estimates based on Azure UK South pricing. Actual costs may vary." >> cost-report.md
+          echo "" >> cost-report.md
+          echo "**💡 Tip:** You can reduce costs by:" >> cost-report.md
+          echo "- Disabling database for dev environments" >> cost-report.md
+          echo "- Reducing CPU/memory allocations" >> cost-report.md
+          echo "- Destroying resources when not in use" >> cost-report.md
+
+      - name: Post cost estimate
+        if: steps.find-configs.outputs.configs != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('cost-report.md', 'utf8');
+
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('💰 Cost Estimation')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
+
+  lint-dockerfiles:
+    name: 🐳 Lint Dockerfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find Dockerfiles
+        id: find-dockerfiles
+        run: |
+          DOCKERFILES=$(git diff --name-only origin/main...HEAD | grep 'Dockerfile$' || echo "")
+          echo "dockerfiles=$DOCKERFILES" >> $GITHUB_OUTPUT
+
+      - name: Lint Dockerfiles
+        if: steps.find-dockerfiles.outputs.dockerfiles != ''
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ steps.find-dockerfiles.outputs.dockerfiles }}
+          ignore: DL3008,DL3009
+          failure-threshold: error
+
+      - name: Create Dockerfile report
+        if: always() && steps.find-dockerfiles.outputs.dockerfiles != ''
+        run: |
+          echo "## 🐳 Dockerfile Best Practices Check" > dockerfile-report.md
+          echo "" >> dockerfile-report.md
+
+          if [ -n "${{ steps.find-dockerfiles.outputs.dockerfiles }}" ]; then
+            echo "✅ Dockerfiles checked for best practices using Hadolint" >> dockerfile-report.md
+            echo "" >> dockerfile-report.md
+            echo "**Checked files:**" >> dockerfile-report.md
+            for df in ${{ steps.find-dockerfiles.outputs.dockerfiles }}; do
+              echo "- \`$df\`" >> dockerfile-report.md
+            done
+            echo "" >> dockerfile-report.md
+            echo "**Common best practices:**" >> dockerfile-report.md
+            echo "- ✅ Use specific image tags (not :latest)" >> dockerfile-report.md
+            echo "- ✅ Minimize layers by combining RUN commands" >> dockerfile-report.md
+            echo "- ✅ Use .dockerignore to reduce context size" >> dockerfile-report.md
+            echo "- ✅ Run as non-root user when possible" >> dockerfile-report.md
+          else
+            echo "No Dockerfiles found in changes" >> dockerfile-report.md
+          fi
+
+      - name: Post Dockerfile report
+        if: always() && steps.find-dockerfiles.outputs.dockerfiles != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('dockerfile-report.md', 'utf8');
+
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+
+            const botComment = comments.data.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes('🐳 Dockerfile Best Practices')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                comment_id: botComment.id,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            } else {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: report
+              });
+            }
+
+  security-scan:
+    name: 🔒 Security Scan
+    runs-on: ubuntu-latest
+    if: false  # Disabled for now - enable when ready to scan images
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker images for scanning
+        run: |
+          # Find Dockerfiles in changed apps
+          CHANGED_APPS=$(git diff --name-only origin/main...HEAD | grep '^apps/' | cut -d'/' -f1-3 | sort -u)
+
+          for app in $CHANGED_APPS; do
+            if [ -f "$app/backend/Dockerfile" ]; then
+              echo "Building backend for $app"
+              docker build -t scan-backend:latest "$app/backend" || true
+            fi
+
+            if [ -f "$app/frontend/Dockerfile" ]; then
+              echo "Building frontend for $app"
+              docker build -t scan-frontend:latest "$app/frontend" || true
+            fi
+          done
+
+      - name: Run Trivy security scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'image'
+          image-ref: 'scan-backend:latest'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+  validation-summary:
+    name: 📊 Validation Summary
+    runs-on: ubuntu-latest
+    needs: [explain-changes, validate-config, estimate-costs, lint-dockerfiles]
+    if: always()
+    steps:
+      - name: Create summary
+        run: |
+          echo "## 📊 Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 📋 Changes Explained | ${{ needs.explain-changes.result == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Config Validation | ${{ needs.validate-config.result == 'success' && '✅ Passed' || needs.validate-config.result == 'skipped' && '⏭️ Skipped' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 💰 Cost Estimation | ${{ needs.estimate-costs.result == 'success' && '✅ Complete' || needs.estimate-costs.result == 'skipped' && '⏭️ Skipped' || '⚠️ Warning' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🐳 Dockerfile Lint | ${{ needs.lint-dockerfiles.result == 'success' && '✅ Passed' || needs.lint-dockerfiles.result == 'skipped' && '⏭️ Skipped' || '⚠️ Issues Found' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.validate-config.result }}" = "success" ] && [ "${{ needs.lint-dockerfiles.result }}" != "failure" ]; then
+            echo "### ✅ All Critical Checks Passed!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Review the detailed comments above" >> $GITHUB_STEP_SUMMARY
+            echo "2. Check cost estimates are acceptable" >> $GITHUB_STEP_SUMMARY
+            echo "3. Request review from @platform-team" >> $GITHUB_STEP_SUMMARY
+            echo "4. Once approved, merge to deploy!" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Some Checks Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please fix the issues reported in the comments above before requesting review." >> $GITHUB_STEP_SUMMARY
+          fi

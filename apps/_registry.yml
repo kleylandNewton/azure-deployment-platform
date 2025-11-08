@@ -1,0 +1,21 @@
+# Application Registry
+# This file tracks all deployed applications in the platform
+
+# Format:
+# - name: Unique app identifier
+#   team: Team name (for cost allocation and ownership)
+#   path: Path to app directory
+#   status: active | inactive | archived
+#   created: Date added to platform
+#   environment: dev | staging | prod
+
+apps:
+  - name: testapp
+    team: pilot
+    path: apps/pilot/testapp
+    status: active
+    created: "2025-01-08"
+    environment: dev
+    description: "Pilot app migrated from azure-test-deployment"
+
+# Add your apps here following the same format

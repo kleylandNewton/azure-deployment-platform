@@ -1,0 +1,164 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "App Configuration Schema",
+  "description": "Defines structure and validation rules for app-config.yml files in the platform",
+  "type": "object",
+  "required": ["app", "components", "environment"],
+  "properties": {
+    "app": {
+      "type": "object",
+      "required": ["name", "team"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]{3,15}$",
+          "description": "App name: 3-15 chars, lowercase letters/numbers/hyphens only. Used in all Azure resource names.",
+          "examples": ["customer-api", "web-app", "data-processor"]
+        },
+        "team": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$",
+          "description": "Team name for ownership and cost allocation",
+          "examples": ["team-a", "platform", "data-team"]
+        },
+        "region": {
+          "type": "string",
+          "default": "uksouth",
+          "enum": ["uksouth", "ukwest", "eastus", "westeurope", "northeurope"],
+          "description": "Azure region for deployment"
+        },
+        "description": {
+          "type": "string",
+          "description": "Brief description of what this app does"
+        }
+      }
+    },
+    "components": {
+      "type": "object",
+      "description": "Define which components to deploy",
+      "properties": {
+        "backend": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Deploy backend container"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535,
+              "default": 8000,
+              "description": "Port the backend listens on"
+            },
+            "cpu": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 4.0,
+              "default": 1.0,
+              "description": "CPU cores allocated (affects cost ~£20/core/month)"
+            },
+            "memory": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 8.0,
+              "default": 1.5,
+              "description": "Memory in GB (affects cost ~£2.5/GB/month)"
+            },
+            "directory": {
+              "type": "string",
+              "default": "./backend",
+              "description": "Path to backend code directory"
+            }
+          },
+          "required": ["enabled"]
+        },
+        "frontend": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Deploy frontend container"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535,
+              "default": 3000,
+              "description": "Port the frontend listens on"
+            },
+            "cpu": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 4.0,
+              "default": 0.5,
+              "description": "CPU cores allocated"
+            },
+            "memory": {
+              "type": "number",
+              "minimum": 0.5,
+              "maximum": 8.0,
+              "default": 1.0,
+              "description": "Memory in GB"
+            },
+            "directory": {
+              "type": "string",
+              "default": "./frontend",
+              "description": "Path to frontend code directory"
+            }
+          },
+          "required": ["enabled"]
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Deploy managed database"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["postgresql", "mysql"],
+              "default": "postgresql",
+              "description": "Database type"
+            },
+            "tier": {
+              "type": "string",
+              "enum": ["Basic", "GeneralPurpose", "MemoryOptimized"],
+              "default": "Basic",
+              "description": "Database tier (affects cost and performance)"
+            },
+            "storage_mb": {
+              "type": "integer",
+              "minimum": 5120,
+              "maximum": 1048576,
+              "default": 32768,
+              "description": "Storage in MB (affects cost ~£0.08/GB/month)"
+            }
+          },
+          "required": ["enabled"]
+        }
+      },
+      "required": ["backend"]
+    },
+    "environment": {
+      "type": "string",
+      "enum": ["dev", "staging", "prod"],
+      "description": "Deployment environment"
+    },
+    "environment_variables": {
+      "type": "object",
+      "description": "Environment variables to inject into containers",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "tags": {
+      "type": "object",
+      "description": "Azure resource tags for organization and cost tracking",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -1,0 +1,58 @@
+# CODEOWNERS - Define access control for platform repository
+#
+# This file determines who can approve changes to different parts of the repo.
+# All changes require at least one approval from the designated owners.
+#
+# Format: path @github-username @github-team
+#
+# Learn more: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# ==============================================================================
+# Platform Infrastructure (Platform Team Only)
+# ==============================================================================
+
+# Core platform code - only platform team can modify
+/platform/ @platform-team
+/.github/workflows/ @platform-team
+/.github/CODEOWNERS @platform-team
+/scripts/ @platform-team
+
+# App registry - platform team must approve all new apps
+/apps/_registry.yml @platform-team
+
+# ==============================================================================
+# Team Applications
+# ==============================================================================
+
+# Pilot team
+/apps/pilot/ @platform-team
+/apps/pilot/**/app-config.yml @platform-team
+
+# Template for future teams:
+# /apps/team-a/ @team-a-leads
+# /apps/team-a/**/app-config.yml @team-a-leads @platform-team
+#
+# /apps/team-b/ @team-b-leads
+# /apps/team-b/**/app-config.yml @team-b-leads @platform-team
+
+# ==============================================================================
+# Documentation (Everyone Can Contribute)
+# ==============================================================================
+
+*.md @platform-team
+
+# ==============================================================================
+# Notes for Platform Team
+# ==============================================================================
+#
+# When adding new teams:
+# 1. Create /apps/team-name/ directory
+# 2. Add CODEOWNERS entry for the team
+# 3. Require platform team approval for app-config.yml changes
+# 4. Update apps/_registry.yml
+#
+# Access Control Model:
+# - Teams own their app code
+# - Teams + Platform own app configs (dual approval)
+# - Platform owns infrastructure
+#

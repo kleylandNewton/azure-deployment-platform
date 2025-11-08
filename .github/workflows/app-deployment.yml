@@ -1,0 +1,483 @@
+name: Deploy Applications
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/**'
+  workflow_dispatch:
+    inputs:
+      app_path:
+        description: 'Specific app to deploy (e.g., apps/pilot/testapp)'
+        required: false
+        type: string
+
+env:
+  TERRAFORM_VERSION: '1.6.0'
+
+jobs:
+  detect-changes:
+    name: 🔍 Detect Changed Apps
+    runs-on: ubuntu-latest
+    outputs:
+      apps: ${{ steps.detect.outputs.apps }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect which apps changed
+        id: detect
+        run: |
+          if [ -n "${{ github.event.inputs.app_path }}" ]; then
+            # Manual workflow dispatch - deploy specific app
+            echo "Manual deployment requested for: ${{ github.event.inputs.app_path }}"
+            CHANGED_APPS='["${{ github.event.inputs.app_path }}"]'
+          else
+            # Automatic deployment - detect changes
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD | grep '^apps/' || echo "")
+
+            if [ -z "$CHANGED_FILES" ]; then
+              echo "No app changes detected"
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "apps=[]" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+
+            # Group by app directory (apps/team/app-name)
+            CHANGED_APPS=$(echo "$CHANGED_FILES" | cut -d'/' -f1-3 | sort -u | jq -R -s -c 'split("\n")[:-1]')
+          fi
+
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "apps=$CHANGED_APPS" >> $GITHUB_OUTPUT
+
+          # Log to summary
+          echo "## 🔍 Deployment Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Apps that will be deployed:**" >> $GITHUB_STEP_SUMMARY
+          echo "$CHANGED_APPS" | jq -r '.[]' | while read app; do
+            echo "- 📦 \`$app\`" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment started at:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+  deploy:
+    name: 🚀 Deploy ${{ matrix.app }}
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJson(needs.detect-changes.outputs.apps) }}
+      fail-fast: false  # Continue deploying other apps even if one fails
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Parse app configuration
+        id: config
+        run: |
+          CONFIG_FILE="${{ matrix.app }}/app-config.yml"
+
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "❌ Error: $CONFIG_FILE not found"
+            exit 1
+          fi
+
+          APP_NAME=$(yq '.app.name' "$CONFIG_FILE")
+          TEAM=$(yq '.app.team' "$CONFIG_FILE")
+          REGION=$(yq '.app.region // "uksouth"' "$CONFIG_FILE")
+          ENVIRONMENT=$(yq '.environment' "$CONFIG_FILE")
+
+          # Validate required fields
+          if [ -z "$APP_NAME" ] || [ "$APP_NAME" = "null" ]; then
+            echo "❌ Error: app.name is required in $CONFIG_FILE"
+            exit 1
+          fi
+
+          if [ -z "$TEAM" ] || [ "$TEAM" = "null" ]; then
+            echo "❌ Error: app.team is required in $CONFIG_FILE"
+            exit 1
+          fi
+
+          echo "app_name=$APP_NAME" >> $GITHUB_OUTPUT
+          echo "team=$TEAM" >> $GITHUB_OUTPUT
+          echo "region=$REGION" >> $GITHUB_OUTPUT
+          echo "environment=$ENVIRONMENT" >> $GITHUB_OUTPUT
+
+          # Log to summary
+          echo "## 📦 Deploying: $APP_NAME" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Team** | $TEAM |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | $ENVIRONMENT |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Region** | $REGION |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Config File** | \`$CONFIG_FILE\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Terraform variables
+        run: |
+          CONFIG_FILE="${{ matrix.app }}/app-config.yml"
+
+          cat > terraform/terraform.tfvars <<EOF
+          # Auto-generated from $CONFIG_FILE
+          # Generated at: $(date -u)
+
+          app_name = "${{ steps.config.outputs.app_name }}"
+          location = "${{ steps.config.outputs.region }}"
+          environment = "${{ steps.config.outputs.environment }}"
+
+          backend_enabled = $(yq '.components.backend.enabled' "$CONFIG_FILE")
+          backend_port = $(yq '.components.backend.port // 8000' "$CONFIG_FILE")
+          backend_cpu = $(yq '.components.backend.cpu // 1.0' "$CONFIG_FILE")
+          backend_memory = $(yq '.components.backend.memory // 1.5' "$CONFIG_FILE")
+
+          frontend_enabled = $(yq '.components.frontend.enabled' "$CONFIG_FILE")
+          frontend_port = $(yq '.components.frontend.port // 3000' "$CONFIG_FILE")
+          frontend_cpu = $(yq '.components.frontend.cpu // 0.5' "$CONFIG_FILE")
+          frontend_memory = $(yq '.components.frontend.memory // 1.0' "$CONFIG_FILE")
+
+          database_enabled = $(yq '.components.database.enabled // false' "$CONFIG_FILE")
+          EOF
+
+          echo "### ⚙️ Terraform Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details>" >> $GITHUB_STEP_SUMMARY
+          echo "<summary>View generated terraform.tfvars</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```hcl' >> $GITHUB_STEP_SUMMARY
+          cat terraform/terraform.tfvars >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: |
+            {
+              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
+              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
+              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
+              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
+            }
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init (Phase 1 - ACR)
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          # Initialize with remote backend
+          # Each app gets its own state file for isolation
+          STATE_KEY="${{ steps.config.outputs.team }}/${{ steps.config.outputs.app_name }}.tfstate"
+
+          echo "### 🗄️ Terraform State Management" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**State Backend:** Azure Blob Storage" >> $GITHUB_STEP_SUMMARY
+          echo "**State File:** \`$STATE_KEY\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Storage Account:** \`${{ secrets.TF_STATE_STORAGE_ACCOUNT }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Why separate state files?**" >> $GITHUB_STEP_SUMMARY
+          echo "- 🛡️ Isolates each app's infrastructure" >> $GITHUB_STEP_SUMMARY
+          echo "- ⚡ Enables parallel deployments" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔒 Prevents accidental cross-app changes" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          terraform init \
+            -backend-config="key=$STATE_KEY" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="resource_group_name=${{ secrets.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="container_name=tfstate"
+
+      - name: Terraform Plan (Phase 1 - ACR only)
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          echo "### 📝 Phase 1: Infrastructure Plan (ACR)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Create Phase 1 tfvars (ACR only)
+          cp ../../../../terraform/terraform.tfvars phase1.tfvars
+          echo "create_containers = false" >> phase1.tfvars
+
+          terraform plan \
+            -var-file=phase1.tfvars \
+            -out=tfplan-phase1 \
+            -no-color | tee plan-output.txt
+
+          # Count resources
+          TO_CREATE=$(grep "will be created" plan-output.txt | wc -l | xargs)
+          TO_UPDATE=$(grep "will be updated" plan-output.txt | wc -l | xargs)
+          TO_DESTROY=$(grep "will be destroyed" plan-output.txt | wc -l | xargs)
+
+          echo "**Phase 1 Changes:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ➕ Creating: $TO_CREATE resources (ACR, Resource Group)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 Updating: $TO_UPDATE resources" >> $GITHUB_STEP_SUMMARY
+          echo "- ❌ Destroying: $TO_DESTROY resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Terraform Apply (Phase 1 - ACR)
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          echo "⚙️ Applying Phase 1: Creating ACR..." >> $GITHUB_STEP_SUMMARY
+
+          terraform apply -auto-approve tfplan-phase1
+
+          echo "✅ Phase 1 complete: ACR created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Terraform State
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-state-${{ steps.config.outputs.app_name }}
+          path: |
+            platform/terraform/modules/app-stack/terraform.tfstate
+            platform/terraform/modules/app-stack/.terraform/
+          retention-days: 1
+
+      - name: Get ACR Details
+        id: acr
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          ACR_NAME=$(terraform output -raw acr_name)
+          ACR_LOGIN_SERVER=$(terraform output -raw acr_login_server)
+
+          echo "acr_name=$ACR_NAME" >> $GITHUB_OUTPUT
+          echo "acr_login_server=$ACR_LOGIN_SERVER" >> $GITHUB_OUTPUT
+
+          echo "**Azure Container Registry:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Name: \`$ACR_NAME\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Login Server: \`$ACR_LOGIN_SERVER\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Login to ACR
+        run: |
+          az acr login --name ${{ steps.acr.outputs.acr_name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Backend Image
+        if: success()
+        run: |
+          CONFIG_FILE="${{ matrix.app }}/app-config.yml"
+          BACKEND_ENABLED=$(yq '.components.backend.enabled' "$CONFIG_FILE")
+
+          if [ "$BACKEND_ENABLED" = "true" ]; then
+            BACKEND_DIR="${{ matrix.app }}/backend"
+
+            if [ -f "$BACKEND_DIR/Dockerfile" ]; then
+              echo "### 🐳 Building Backend Image" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+
+              IMAGE_TAG="${{ steps.acr.outputs.acr_login_server }}/app-backend:latest"
+
+              docker build -t $IMAGE_TAG $BACKEND_DIR
+              docker push $IMAGE_TAG
+
+              echo "✅ Backend image pushed: \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ Backend enabled but Dockerfile not found at $BACKEND_DIR/Dockerfile" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Build and Push Frontend Image
+        if: success()
+        run: |
+          CONFIG_FILE="${{ matrix.app }}/app-config.yml"
+          FRONTEND_ENABLED=$(yq '.components.frontend.enabled' "$CONFIG_FILE")
+
+          if [ "$FRONTEND_ENABLED" = "true" ]; then
+            FRONTEND_DIR="${{ matrix.app }}/frontend"
+
+            if [ -f "$FRONTEND_DIR/Dockerfile" ]; then
+              echo "### 🎨 Building Frontend Image" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+
+              IMAGE_TAG="${{ steps.acr.outputs.acr_login_server }}/app-frontend:latest"
+
+              docker build -t $IMAGE_TAG $FRONTEND_DIR
+              docker push $IMAGE_TAG
+
+              echo "✅ Frontend image pushed: \`$IMAGE_TAG\`" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "⚠️ Frontend enabled but Dockerfile not found at $FRONTEND_DIR/Dockerfile" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+
+      - name: Download Terraform State
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-state-${{ steps.config.outputs.app_name }}
+          path: platform/terraform/modules/app-stack/
+
+      - name: Terraform Plan (Phase 2 - Containers)
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          echo "### 📝 Phase 2: Infrastructure Plan (Containers)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Create Phase 2 tfvars (with containers)
+          cp ../../../../terraform/terraform.tfvars phase2.tfvars
+          echo "create_containers = true" >> phase2.tfvars
+
+          terraform plan \
+            -var-file=phase2.tfvars \
+            -out=tfplan-phase2 \
+            -no-color | tee plan-output-phase2.txt
+
+          # Count resources
+          TO_CREATE=$(grep "will be created" plan-output-phase2.txt | wc -l | xargs)
+          TO_UPDATE=$(grep "will be updated" plan-output-phase2.txt | wc -l | xargs)
+
+          echo "**Phase 2 Changes:**" >> $GITHUB_STEP_SUMMARY
+          echo "- ➕ Creating: $TO_CREATE resources (Container Instances)" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔄 Updating: $TO_UPDATE resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Terraform Apply (Phase 2 - Containers)
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          echo "⚙️ Applying Phase 2: Creating containers..." >> $GITHUB_STEP_SUMMARY
+
+          terraform apply -auto-approve tfplan-phase2
+
+          echo "✅ Phase 2 complete: Containers created" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Get Deployment Outputs
+        id: outputs
+        working-directory: platform/terraform/modules/app-stack
+        run: |
+          BACKEND_URL=$(terraform output -raw backend_url 2>/dev/null || echo "Not deployed")
+          FRONTEND_URL=$(terraform output -raw frontend_url 2>/dev/null || echo "Not deployed")
+          RESOURCE_GROUP=$(terraform output -raw resource_group_name 2>/dev/null || echo "Unknown")
+
+          echo "backend_url=$BACKEND_URL" >> $GITHUB_OUTPUT
+          echo "frontend_url=$FRONTEND_URL" >> $GITHUB_OUTPUT
+          echo "resource_group=$RESOURCE_GROUP" >> $GITHUB_OUTPUT
+
+      - name: Health Checks
+        run: |
+          echo "### 🏥 Health Checks" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          BACKEND_URL="${{ steps.outputs.outputs.backend_url }}"
+          FRONTEND_URL="${{ steps.outputs.outputs.frontend_url }}"
+
+          # Wait for containers to start
+          echo "⏳ Waiting 30 seconds for containers to fully start..." >> $GITHUB_STEP_SUMMARY
+          sleep 30
+
+          # Check backend
+          if [ "$BACKEND_URL" != "Not deployed" ]; then
+            echo "**Backend Health Check:**" >> $GITHUB_STEP_SUMMARY
+            for i in {1..10}; do
+              if curl -f -s "$BACKEND_URL" > /dev/null 2>&1; then
+                echo "- ✅ Backend is healthy (attempt $i)" >> $GITHUB_STEP_SUMMARY
+                echo "- URL: $BACKEND_URL" >> $GITHUB_STEP_SUMMARY
+                break
+              else
+                if [ $i -eq 10 ]; then
+                  echo "- ⚠️ Backend not responding after 10 attempts" >> $GITHUB_STEP_SUMMARY
+                  echo "- This may be normal if container is still starting" >> $GITHUB_STEP_SUMMARY
+                fi
+                sleep 10
+              fi
+            done
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check frontend
+          if [ "$FRONTEND_URL" != "Not deployed" ]; then
+            echo "**Frontend Health Check:**" >> $GITHUB_STEP_SUMMARY
+            for i in {1..10}; do
+              if curl -f -s "$FRONTEND_URL" > /dev/null 2>&1; then
+                echo "- ✅ Frontend is healthy (attempt $i)" >> $GITHUB_STEP_SUMMARY
+                echo "- URL: $FRONTEND_URL" >> $GITHUB_STEP_SUMMARY
+                break
+              else
+                if [ $i -eq 10 ]; then
+                  echo "- ⚠️ Frontend not responding after 10 attempts" >> $GITHUB_STEP_SUMMARY
+                  echo "- This may be normal if container is still starting" >> $GITHUB_STEP_SUMMARY
+                fi
+                sleep 10
+              fi
+            done
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "## 🎉 Deployment Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🌐 Access Your Application" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          BACKEND_URL="${{ steps.outputs.outputs.backend_url }}"
+          FRONTEND_URL="${{ steps.outputs.outputs.frontend_url }}"
+
+          if [ "$BACKEND_URL" != "Not deployed" ]; then
+            echo "**Backend API:**" >> $GITHUB_STEP_SUMMARY
+            echo "- URL: [$BACKEND_URL]($BACKEND_URL)" >> $GITHUB_STEP_SUMMARY
+            echo "- Try: \`curl $BACKEND_URL/health\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "$FRONTEND_URL" != "Not deployed" ]; then
+            echo "**Frontend:**" >> $GITHUB_STEP_SUMMARY
+            echo "- URL: [$FRONTEND_URL]($FRONTEND_URL)" >> $GITHUB_STEP_SUMMARY
+            echo "- Open in browser to see your app" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "### 📊 Azure Resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Resource Group:** \`${{ steps.outputs.outputs.resource_group }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "[View in Azure Portal](https://portal.azure.com/#@/resource/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ steps.outputs.outputs.resource_group }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏱️ Deployment Timeline" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "- Duration: ~$SECONDS seconds" >> $GITHUB_STEP_SUMMARY
+
+  deployment-summary:
+    name: 📊 Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [detect-changes, deploy]
+    if: always()
+    steps:
+      - name: Create overall summary
+        run: |
+          echo "## 📊 Overall Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Status:** ${{ needs.deploy.result == 'success' && '✅ Success' || needs.deploy.result == 'failure' && '❌ Failed' || '⏭️ Skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.detect-changes.outputs.has_changes }}" = "false" ]; then
+            echo "**No app changes detected** - Nothing to deploy" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Apps Deployed:**" >> $GITHUB_STEP_SUMMARY
+            echo '${{ needs.detect-changes.outputs.apps }}' | jq -r '.[]' | while read app; do
+              echo "- \`$app\`" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployment Method:** ${{ github.event_name == 'workflow_dispatch' && '🖱️ Manual' || '🤖 Automatic (Push to main)' }}" >> $GITHUB_STEP_SUMMARY
