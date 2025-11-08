@@ -330,7 +330,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Create Phase 2 tfvars (with containers)
-          cp ../../../../terraform/terraform.tfvars phase2.tfvars
+          cp terraform.tfvars phase2.tfvars
           echo "create_containers = true" >> phase2.tfvars
 
           terraform plan \
