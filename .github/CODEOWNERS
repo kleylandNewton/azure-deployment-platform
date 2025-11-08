@@ -12,34 +12,34 @@
 # ==============================================================================
 
 # Core platform code - only platform team can modify
-/platform/ @platform-team
-/.github/workflows/ @platform-team
-/.github/CODEOWNERS @platform-team
-/scripts/ @platform-team
+/platform/ @kleylandNewton
+/.github/workflows/ @kleylandNewton
+/.github/CODEOWNERS @kleylandNewton
+/scripts/ @kleylandNewton
 
 # App registry - platform team must approve all new apps
-/apps/_registry.yml @platform-team
+/apps/_registry.yml @kleylandNewton
 
 # ==============================================================================
 # Team Applications
 # ==============================================================================
 
 # Pilot team
-/apps/pilot/ @platform-team
-/apps/pilot/**/app-config.yml @platform-team
+/apps/pilot/ @kleylandNewton
+/apps/pilot/**/app-config.yml @kleylandNewton
 
 # Template for future teams:
 # /apps/team-a/ @team-a-leads
-# /apps/team-a/**/app-config.yml @team-a-leads @platform-team
+# /apps/team-a/**/app-config.yml @team-a-leads @kleylandNewton
 #
 # /apps/team-b/ @team-b-leads
-# /apps/team-b/**/app-config.yml @team-b-leads @platform-team
+# /apps/team-b/**/app-config.yml @team-b-leads @kleylandNewton
 
 # ==============================================================================
 # Documentation (Everyone Can Contribute)
 # ==============================================================================
 
-*.md @platform-team
+*.md @kleylandNewton
 
 # ==============================================================================
 # Notes for Platform Team
