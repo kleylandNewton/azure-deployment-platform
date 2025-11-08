@@ -1,0 +1,23 @@
+app:
+  name: "testapp"
+  team: "pilot"
+  region: "uksouth"
+  description: "Pilot app for testing platform"
+
+components:
+  backend:
+    enabled: true
+    port: 8000
+    cpu: 1.0
+    memory: 1.5
+
+  frontend:
+    enabled: true
+    port: 3000
+    cpu: 0.5
+    memory: 1.0
+
+  database:
+    enabled: false
+
+environment: "dev"

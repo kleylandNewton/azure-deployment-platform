@@ -6,6 +6,11 @@ on:
       - 'apps/**'
       - 'platform/validation/**'
 
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   explain-changes:
     name: 📋 Explain What Changed
@@ -173,34 +178,7 @@ jobs:
 
               # Parse and display errors
               if [ -f result.json ]; then
-                python -c "
-import json
-import sys
-
-try:
-    with open('result.json') as f:
-        result = json.load(f)
-
-    if not result.get('is_valid', False):
-        print('**Issues found:**\n')
-        for error in result.get('errors', []):
-            severity = error.get('severity', 'error')
-            emoji = '🔴' if severity == 'critical' else '⚠️' if severity == 'warning' else '❌'
-
-            print(f'{emoji} **{error.get(\"error\", \"Unknown error\")}**')
-            if 'field' in error:
-                print(f'   - **Field:** \`{error[\"field\"]}\`')
-            if 'why_this_matters' in error:
-                print(f'   - **Why this matters:** {error[\"why_this_matters\"]}')
-            if 'fix' in error:
-                print(f'   - **How to fix:** {error[\"fix\"]}')
-            if 'docs_link' in error:
-                print(f'   - **Documentation:** [{error[\"docs_link\"]}]({error[\"docs_link\"]})')
-            print()
-except Exception as e:
-    print(f'Error parsing validation results: {e}')
-    sys.exit(1)
-                " >> validation-report.md
+                python3 -c 'import json; result = json.load(open("result.json")); [print(f"❌ **{e.get(\"error\")}**\n   - **Why:** {e.get(\"why_this_matters\", \"N/A\")}\n   - **Fix:** {e.get(\"fix\", \"N/A\")}\n") for e in result.get("errors", [])]' >> validation-report.md || echo "Could not parse errors" >> validation-report.md
               fi
             fi
 
