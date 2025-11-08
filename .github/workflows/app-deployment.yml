@@ -207,7 +207,7 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Create Phase 1 tfvars (ACR only)
-          cp ../../../../terraform/terraform.tfvars phase1.tfvars
+          cp terraform.tfvars phase1.tfvars
           echo "create_containers = false" >> phase1.tfvars
 
           terraform plan \
